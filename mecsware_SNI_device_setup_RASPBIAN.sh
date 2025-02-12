@@ -6,8 +6,21 @@
 # 3. Run it with sudo: sudo ./setup_routes.sh
 #
 # This script sets up static routes and a static IP on a Raspberry Pi.
-# If eth0 is not available, the script will prompt for an alternative interface.
-# The user can also specify an IP address within the 10.0.3.xxx range.
+# It detects the active network manager (NetworkManager, systemd-networkd, or dhcpcd)
+# and configures the network accordingly.
+
+# Function to detect the active network manager
+detect_network_manager() {
+    if systemctl is-active --quiet NetworkManager; then
+        echo "NetworkManager"
+    elif systemctl is-active --quiet systemd-networkd; then
+        echo "systemd-networkd"
+    elif systemctl is-active --quiet dhcpcd; then
+        echo "dhcpcd"
+    else
+        echo "unknown"
+    fi
+}
 
 # Function to prompt for an interface if eth0 is not found
 get_interface() {
@@ -42,18 +55,37 @@ read -p "Enter a static IP in the 10.0.3.xxx range (default: 10.0.3.100): " STAT
 
 echo "Setting static IP: $STATIC_IP on $INTERFACE"
 
-# Backup dhcpcd.conf before modifying it
-cp /etc/dhcpcd.conf /etc/dhcpcd.conf.bak
+NETWORK_MANAGER=$(detect_network_manager)
+echo "Detected network manager: $NETWORK_MANAGER"
 
-echo "
-interface $INTERFACE
-static ip_address=$STATIC_IP/24
-static routers=10.0.3.1
-static domain_name_servers=8.8.8.8 8.8.4.4
-" | tee -a /etc/dhcpcd.conf
-
-# Restart networking service to apply changes
-systemctl restart dhcpcd
+if [[ "$NETWORK_MANAGER" == "NetworkManager" ]]; then
+    # Check if the connection exists
+    if ! nmcli con show "$INTERFACE" > /dev/null 2>&1; then
+        echo "NetworkManager connection for $INTERFACE does not exist. Creating one..."
+        nmcli con add type ethernet ifname $INTERFACE con-name $INTERFACE
+    fi
+    # Configure static IP using NetworkManager
+    nmcli con mod $INTERFACE ipv4.addresses $STATIC_IP/24
+    nmcli con mod $INTERFACE ipv4.gateway 10.0.3.1
+    nmcli con mod $INTERFACE ipv4.dns "8.8.8.8 8.8.4.4"
+    nmcli con mod $INTERFACE ipv4.method manual
+    nmcli con up $INTERFACE
+    echo "Static IP configuration applied using NetworkManager."
+elif [[ "$NETWORK_MANAGER" == "systemd-networkd" ]]; then
+    # Configure static IP using systemd-networkd
+    CONFIG_FILE="/etc/systemd/network/10-static.network"
+    echo -e "[Match]\nName=$INTERFACE\n\n[Network]\nAddress=$STATIC_IP/24\nGateway=10.0.3.1\nDNS=8.8.8.8 8.8.4.4" | sudo tee $CONFIG_FILE
+    sudo systemctl restart systemd-networkd
+    echo "Static IP configuration applied using systemd-networkd."
+elif [[ "$NETWORK_MANAGER" == "dhcpcd" ]]; then
+    # Configure static IP using dhcpcd
+    echo -e "interface $INTERFACE\nstatic ip_address=$STATIC_IP/24\nstatic routers=10.0.3.1\nstatic domain_name_servers=8.8.8.8 8.8.4.4" | sudo tee -a /etc/dhcpcd.conf
+    sudo systemctl restart dhcpcd
+    echo "Static IP configuration applied using dhcpcd."
+else
+    echo "Unknown network manager detected. Manual configuration may be required."
+    exit 1
+fi
 
 # Add routes
 ip route add 10.0.1.2 dev $INTERFACE
@@ -62,18 +94,6 @@ ip route add 10.0.5.0/24 via 10.0.3.4 dev $INTERFACE
 ip route add 10.0.5.0/24 via 10.0.1.2 dev $INTERFACE
 
 echo "Routes added successfully."
-
-# Persist routes in /etc/rc.local (before exit 0)
-if ! grep -q "ip route add" /etc/rc.local; then
-    sed -i '/^exit 0/i \
-ip route add 10.0.1.2 dev '$INTERFACE'\
-ip route add 10.0.3.0/24 dev '$INTERFACE'\
-ip route add 10.0.5.0/24 via 10.0.3.4 dev '$INTERFACE'\
-ip route add 10.0.5.0/24 via 10.0.1.2 dev '$INTERFACE'\
-' /etc/rc.local
-fi
-
-echo "Routes persisted in /etc/rc.local."
 
 # Display network configuration
 ip addr show $INTERFACE
