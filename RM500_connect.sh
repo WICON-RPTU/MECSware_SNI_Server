@@ -1,6 +1,6 @@
 #!/bin/bash
 # sudo chmod +x connect_5g_modem.sh
-# ./connect_5g_modem.sh
+# ./RM500_connect.sh
 
 # Check if udhcpc is installed
 if ! command -v udhcpc &> /dev/null; then
